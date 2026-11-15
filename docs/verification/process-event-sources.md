@@ -245,3 +245,10 @@ Proactive delivery is inside that same boundary.
 The watcher reports a queued process-event result through the one shared actionable-exit path (`wake` in `bin/fm-push-transition-lib.sh`) that every existing signal, stale, and check wake already uses, so it reads no pane, queries no backend, and names no harness.
 Both axes are therefore unaffected by construction rather than by assumption: every supported primary harness re-arms from that same exit, and every runtime backend supplies endpoint state only to the pane paths this change does not touch.
 While `state/.afk` exists the watcher stays one-shot as before, because this delivery ends the cycle exactly like the existing check path and leaves classification to the daemon.
+
+## Aviary operator wake integration (2026-11-14)
+
+On Linux, `bash tests/fm-procevent-aviary.test.sh` passed against Firstmate base commit `bf0f3468` with a mocked Aviary protocol-version-2 CLI.
+The exact output was `# fm-procevent-aviary tests passed`.
+The test armed an explicit loopback endpoint and `firstmate` participant, tracked a decision ID, crossed a simulated disconnect/reconnect, reconciled an operator inbox message and decision answer/deferral, and exercised generic process-event capture and idempotent auto-handling.
+The test does not exercise an installed Aviary binary or live service, remote networking, OS-crash recovery, or human operator behavior.
