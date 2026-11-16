@@ -43,6 +43,28 @@ if operation["op"] == "service_info":
     print(json.dumps({"service": "aviary", "protocol": 2, "database": "/tmp/aviary-test.sqlite", "pid": 12345}))
     raise SystemExit(0)
 
+if operation["op"] == "submit":
+    with open(os.environ["AVIARY_SUBMIT_COUNT"], "a", encoding="utf-8") as stream:
+        stream.write(operation["request"]["identity"] + "\n")
+    submissions = {}
+    try:
+        with open(os.environ["AVIARY_SUBMISSIONS"], encoding="utf-8") as stream:
+            submissions = json.load(stream)
+    except FileNotFoundError:
+        pass
+    identity = operation["request"]["identity"]
+    submissions.setdefault(identity, 73)
+    with open(os.environ["AVIARY_SUBMISSIONS"], "w", encoding="utf-8") as stream:
+        json.dump(submissions, stream)
+    try:
+        os.unlink(os.environ["AVIARY_LOSE_SUBMIT_REPLY"])
+    except FileNotFoundError:
+        pass
+    else:
+        raise SystemExit(8)
+    print(json.dumps({"id": submissions[identity]}))
+    raise SystemExit(0)
+
 count = 0
 try:
     with open(os.environ["AVIARY_CALL_COUNT"], encoding="utf-8") as stream:
@@ -134,6 +156,58 @@ assert db.execute("SELECT id FROM messages").fetchall() == [(41,)]
 cursor, answer = db.execute("SELECT deferred_after, answer FROM decisions WHERE id = 12").fetchone()
 assert cursor == 9
 assert len(answer) == 64
+PY
+
+request_file="$TMP/request.json"
+cat >"$request_file" <<'JSON'
+{"identity":"fm-aviary-test-decision-identity","agent":"firstmate","question":"Proceed with the bounded test?","options":["No","Yes"],"recommendation":1,"reason":"Verify durable submission and ID tracking."}
+JSON
+touch "$TMP/lose-submit-reply"
+export AVIARY_SUBMIT_COUNT="$TMP/submitted-identities" \
+  AVIARY_SUBMISSIONS="$TMP/submissions.json" \
+  AVIARY_LOSE_SUBMIT_REPLY="$TMP/lose-submit-reply"
+if "$adapter" submit-decision --address "$address" --participant "$participant" \
+  --identity fm-aviary-test-decision-identity --request-file "$request_file" >"$TMP/lost-submit.out" 2>&1; then
+  printf 'Aviary submission did not simulate its unknown outcome\n' >&2
+  exit 1
+fi
+python3 - "$db" <<'PY'
+import sqlite3
+import sys
+db = sqlite3.connect(sys.argv[1])
+assert db.execute(
+    "SELECT decision_id FROM decision_submissions WHERE identity = ?",
+    ("fm-aviary-test-decision-identity",),
+).fetchone() == (None,)
+PY
+[ "$("$adapter" retry-submissions --address "$address" --participant "$participant")" = 'submitted: 73' ]
+[ "$("$adapter" submit-decision --address "$address" --participant "$participant" \
+  --identity fm-aviary-test-decision-identity --request-file "$request_file")" = 'submitted: 73' ]
+cat >"$TMP/conflict.json" <<'JSON'
+{"identity":"fm-aviary-test-decision-identity","agent":"firstmate","question":"Different request under same identity?","options":["No","Yes"],"recommendation":1,"reason":"Must be rejected locally."}
+JSON
+if "$adapter" submit-decision --address "$address" --participant "$participant" \
+  --identity fm-aviary-test-decision-identity --request-file "$TMP/conflict.json" >/dev/null 2>&1; then
+  printf 'Aviary submission identity accepted conflicting request content\n' >&2
+  exit 1
+fi
+python3 - "$db" "$AVIARY_SUBMIT_COUNT" "$AVIARY_SUBMISSIONS" <<'PY'
+import json
+import sqlite3
+import sys
+db = sqlite3.connect(sys.argv[1])
+assert db.execute("SELECT id FROM decisions ORDER BY id").fetchall() == [(12,), (73,)]
+assert db.execute(
+    "SELECT decision_id FROM decision_submissions WHERE identity = ?",
+    ("fm-aviary-test-decision-identity",),
+).fetchone() == (73,)
+assert open(sys.argv[2], encoding="utf-8").read().splitlines() == [
+    "fm-aviary-test-decision-identity",
+    "fm-aviary-test-decision-identity",
+]
+assert json.load(open(sys.argv[3], encoding="utf-8")) == {
+    "fm-aviary-test-decision-identity": 73
+}
 PY
 
 "$ROOT/bin/fm-procevent.sh" retire "$source_id" >/dev/null

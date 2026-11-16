@@ -15,8 +15,8 @@ The runner exists so a blocking external process never holds firstmate's convers
 Firstmate registers a source, keeps working, and is woken when that process completes.
 
 For Aviary TUI messages or replies to Firstmate's decisions, use `bin/fm-procevent-aviary.sh` with an explicitly verified loopback endpoint and participant.
-After submitting a decision as `firstmate`, track its returned ID with the adapter's `track-decision` command.
-The operating contract, retained-message baseline, and restart behavior are owned by [Process-to-event sources](../../../docs/configuration.md#aviary-operator-messages-and-decisions).
+Submit Firstmate's operator decisions through the adapter's durable outbox, and retry staged submissions with the same identity after an uncertain result or restart.
+The operating contract, request format, retained-message baseline, and recovery behavior are owned by [Process-to-event sources](../../../docs/configuration.md#aviary-operator-messages-and-decisions).
 
 ## Arming a source
 

@@ -3100,9 +3100,22 @@ Captured message IDs and decision answer/deferral cursors are committed to the p
 An interrupted capture is therefore eligible for replay by the normal process-event runner.
 The result contains full decision answers only when they fit its bounded preview; use Aviary's `decision_status` operation by the reported decision ID to inspect the retained full answer.
 
-To wake on decisions requested by Firstmate, track each returned Aviary decision ID with `bin/fm-procevent-aviary.sh track-decision --address 127.0.0.1:7432 --participant firstmate --id <decision-id>` immediately after submission.
-The adapter checks current decision status and retained deferral events, so a completed answer can be found after a Firstmate restart even though it no longer appears in the pending queue.
-Only explicitly tracked decision IDs are monitored.
+After arming the adapter, ask the operator to decide something by preparing a JSON `DecisionRequest` whose `identity` is a stable, unique retry key and whose `agent` is `firstmate`, then submitting it through the adapter:
+
+```json
+{"identity":"<stable-key>","agent":"firstmate","question":"Proceed with the change?","options":["No","Yes"],"recommendation":1,"reason":"The implementation is ready for review."}
+```
+
+```sh
+bin/fm-procevent-aviary.sh submit-decision --address 127.0.0.1:7432 --participant firstmate --identity <stable-key> --request-file <request.json>
+```
+
+The adapter validates that the request identity and recipient match the command, commits the exact request to its private SQLite outbox before sending it, and records the returned ID in the tracked-decision table before reporting success.
+If the call's outcome is uncertain, repeat the same command with the same identity and unchanged request file; Aviary's submission idempotency returns the original ID, and the adapter refuses reuse of a local identity with different request content.
+After a Firstmate restart, run `bin/fm-procevent-aviary.sh retry-submissions --address 127.0.0.1:7432 --participant firstmate` to complete any staged submissions whose result was not durably recorded.
+Never retry an uncertain operator answer by submitting another answer; Aviary answers do not use submission identities.
+The adapter checks current status and retained deferral events for every decision it submitted, so a completed answer can be found after restart even though it no longer appears in the pending queue.
+Only decisions submitted or explicitly added with `track-decision` are monitored.
 Use `bin/fm-procevent-aviary.sh retire --address 127.0.0.1:7432 --participant firstmate` to stop the source.
 
 This integration provides durable reconciliation after hints and process restarts, not lossless notification delivery or a finite delay guarantee during an undetected network partition.

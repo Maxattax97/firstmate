@@ -24,6 +24,51 @@ class ServiceIdentityError(RuntimeError):
     pass
 
 
+def validate_decision_request(request: Any, participant: str, identity: str) -> dict[str, Any]:
+    allowed = {
+        "identity",
+        "agent",
+        "question",
+        "explanation",
+        "context",
+        "activity",
+        "options",
+        "importance",
+        "recommendation",
+        "reason",
+    }
+    if not isinstance(request, dict) or set(request) - allowed:
+        raise RuntimeError("Aviary decision request has an unsupported shape")
+    if request.get("identity") != identity or not identity:
+        raise RuntimeError("Aviary request identity must match --identity")
+    if request.get("agent") != participant:
+        raise RuntimeError("Aviary decision request agent must match the configured participant")
+    if not isinstance(request.get("question"), str) or not request["question"]:
+        raise RuntimeError("Aviary decision question must be non-empty text")
+    options = request.get("options")
+    if not isinstance(options, list) or any(not isinstance(option, str) or not option for option in options):
+        raise RuntimeError("Aviary decision options must be an array of non-empty strings")
+    importance = request.get("importance", 0)
+    if type(importance) is not int or not 0 <= importance <= 5:
+        raise RuntimeError("Aviary decision importance must be an integer from 0 to 5")
+    recommendation = request.get("recommendation")
+    reason = request.get("reason")
+    if recommendation is not None:
+        if type(recommendation) is not int or not 0 <= recommendation < len(options):
+            raise RuntimeError("Aviary recommendation must select an existing option")
+        if not isinstance(reason, str) or not reason:
+            raise RuntimeError("Aviary recommendation requires a non-empty reason")
+    elif reason is not None:
+        raise RuntimeError("Aviary reason requires a recommendation")
+    for field in ("explanation", "context"):
+        if field in request and request[field] is not None and not isinstance(request[field], str):
+            raise RuntimeError(f"Aviary decision {field} must be text or null")
+    if "activity" in request and request["activity"] is not None:
+        if not isinstance(request["activity"], str) or not request["activity"]:
+            raise RuntimeError("Aviary decision activity must be non-empty text or null")
+    return request
+
+
 def connect(db_path: str) -> sqlite3.Connection:
     path = Path(db_path)
     if path.is_symlink():
@@ -46,6 +91,11 @@ def connect(db_path: str) -> sqlite3.Connection:
             id INTEGER PRIMARY KEY,
             deferred_after INTEGER NOT NULL DEFAULT 0,
             answer TEXT
+        );
+        CREATE TABLE IF NOT EXISTS decision_submissions (
+            identity TEXT PRIMARY KEY,
+            request_json TEXT NOT NULL,
+            decision_id INTEGER
         );
         """
     )
@@ -86,6 +136,78 @@ def service_identity(db: sqlite3.Connection, address: str) -> None:
     expected = db.execute("SELECT value FROM metadata WHERE key = 'service-database'").fetchone()
     if not isinstance(database, str) or expected is None or database != expected[0]:
         raise ServiceIdentityError("aviary-database-changed")
+
+
+def stage_submission(
+    db: sqlite3.Connection,
+    address: str,
+    participant: str,
+    identity: str,
+    request_path: str,
+) -> int | None:
+    service_identity(db, address)
+    with open(request_path, "r", encoding="utf-8") as stream:
+        request = validate_decision_request(json.load(stream), participant, identity)
+    request_json = json.dumps(
+        request, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+    )
+    row = db.execute(
+        "SELECT request_json, decision_id FROM decision_submissions WHERE identity = ?",
+        (identity,),
+    ).fetchone()
+    if row is not None:
+        if row[0] != request_json:
+            raise RuntimeError("Aviary submission identity is already bound to different request content")
+        return row[1]
+    db.execute(
+        "INSERT INTO decision_submissions(identity, request_json) VALUES (?, ?)",
+        (identity, request_json),
+    )
+    return None
+
+
+def submit_one(db: sqlite3.Connection, address: str, identity: str) -> int:
+    service_identity(db, address)
+    row = db.execute(
+        "SELECT request_json, decision_id FROM decision_submissions WHERE identity = ?",
+        (identity,),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("Aviary decision submission is not staged")
+    request_json, existing_id = row
+    if existing_id is not None:
+        return existing_id
+
+    response = call(address, {"op": "submit", "request": json.loads(request_json)})
+    decision_id = response.get("id")
+    if type(decision_id) is not int or decision_id <= 0:
+        raise RuntimeError("Aviary returned an invalid decision ID")
+    status = call(address, {"op": "decision_status", "id": decision_id, "after": 0})
+    if status.get("id") != decision_id:
+        raise RuntimeError("Aviary decision status did not match the submitted ID")
+
+    with db:
+        current = db.execute(
+            "SELECT request_json, decision_id FROM decision_submissions WHERE identity = ?",
+            (identity,),
+        ).fetchone()
+        if current is None or current[0] != request_json:
+            raise RuntimeError("Aviary decision submission changed while in flight")
+        if current[1] is not None and current[1] != decision_id:
+            raise RuntimeError("Aviary submission identity resolved to conflicting decision IDs")
+        db.execute("INSERT OR IGNORE INTO decisions(id) VALUES (?)", (decision_id,))
+        db.execute(
+            "UPDATE decision_submissions SET decision_id = ? WHERE identity = ?",
+            (decision_id, identity),
+        )
+    return decision_id
+
+
+def retry_submissions(db: sqlite3.Connection, address: str) -> list[tuple[str, int]]:
+    pending = db.execute(
+        "SELECT identity FROM decision_submissions WHERE decision_id IS NULL ORDER BY identity"
+    ).fetchall()
+    return [(identity, submit_one(db, address, identity)) for (identity,) in pending]
 
 
 def pages(address: str, participant: str):
@@ -290,6 +412,8 @@ def watch_poll(db: sqlite3.Connection, address: str, participant: str) -> None:
                 try:
                     service_identity(db, address)
                     result = reconcile(db, address, participant)
+                    # The poll remains open while callers update the same ledger.
+                    db.commit()
                 except ServiceIdentityError as exc:
                     error_code = str(exc)
                     previous = db.execute("SELECT value FROM metadata WHERE key = 'last-error'").fetchone()
@@ -352,11 +476,15 @@ def watch_poll(db: sqlite3.Connection, address: str, participant: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("init", "track", "poll", "apply", "message"))
+    parser.add_argument(
+        "command",
+        choices=("init", "track", "poll", "apply", "message", "stage-submission", "submit", "retry-submissions"),
+    )
     parser.add_argument("database")
     parser.add_argument("address")
     parser.add_argument("participant")
     parser.add_argument("value", nargs="?")
+    parser.add_argument("extra", nargs="?")
     args = parser.parse_args()
     try:
         db = connect(args.database)
@@ -385,6 +513,27 @@ def main() -> int:
                 if status.get("id") != decision_id:
                     raise RuntimeError("Aviary decision status did not match the requested ID")
                 db.execute("INSERT OR IGNORE INTO decisions(id) VALUES (?)", (decision_id,))
+            elif args.command == "stage-submission":
+                if not args.value or not args.extra:
+                    raise RuntimeError("Aviary submission identity and request file are required")
+                existing_id = stage_submission(
+                    db, args.address, args.participant, args.value, args.extra
+                )
+                if existing_id is None:
+                    print("staged")
+                else:
+                    print(f"already-submitted: {existing_id}")
+            elif args.command == "submit":
+                if not args.value:
+                    raise RuntimeError("Aviary submission identity is required")
+                print(submit_one(db, args.address, args.value))
+            elif args.command == "retry-submissions":
+                completed = retry_submissions(db, args.address)
+                if completed:
+                    for _, decision_id in completed:
+                        print(f"submitted: {decision_id}")
+                else:
+                    print("no pending Aviary decision submissions")
             elif args.command == "apply":
                 if not args.value:
                     raise RuntimeError("Capture result path is required")

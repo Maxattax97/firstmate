@@ -3,6 +3,8 @@
 #
 # Usage:
 #   fm-procevent-aviary.sh arm --address 127.0.0.1:7432 --participant firstmate
+#   fm-procevent-aviary.sh submit-decision --address ADDRESS --participant LABEL --identity KEY --request-file REQUEST.json
+#   fm-procevent-aviary.sh retry-submissions --address ADDRESS --participant LABEL
 #   fm-procevent-aviary.sh track-decision --address ADDRESS --participant LABEL --id ID
 #   fm-procevent-aviary.sh message --address ADDRESS --participant LABEL --id ID
 #   fm-procevent-aviary.sh source-id ADDRESS PARTICIPANT
@@ -12,8 +14,10 @@
 #   fm-procevent-aviary.sh relisten
 #   fm-procevent-aviary.sh retire --address ADDRESS --participant LABEL
 #
-# Aviary notifications are hints. The poller subscribes first, then reconciles
-# retained inbox messages and tracked decisions after each revision/reconnect.
+# Aviary submission identities and exact request content are durably staged
+# before send. Retries reuse the same identity, and returned IDs become tracked
+# in the same local transaction. Notifications are hints; the poller subscribes
+# first, then reconciles retained inbox messages and tracked decisions.
 #
 set -euo pipefail
 
@@ -101,7 +105,7 @@ cmd_source_id() {
 }
 
 cmd_arm() {
-  local address= participant= db
+  local address='' participant='' db=''
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --address) [ -n "${2-}" ] || die "--address needs an endpoint"; address=$2; shift 2 ;;
@@ -124,7 +128,7 @@ cmd_arm() {
 }
 
 cmd_track_decision() {
-  local address= participant= id= db
+  local address='' participant='' id='' db=''
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --address) [ -n "${2-}" ] || die "--address needs an endpoint"; address=$2; shift 2 ;;
@@ -140,8 +144,46 @@ cmd_track_decision() {
   printf 'tracked: %s\n' "$id"
 }
 
+cmd_submit_decision() {
+  local address='' participant='' identity='' request_file='' db='' decision_id=''
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --address) [ -n "${2-}" ] || die "--address needs an endpoint"; address=$2; shift 2 ;;
+      --participant) [ -n "${2-}" ] || die "--participant needs a label"; participant=$2; shift 2 ;;
+      --identity) [ -n "${2-}" ] || die "--identity needs a stable submission key"; identity=$2; shift 2 ;;
+      --request-file) [ -n "${2-}" ] || die "--request-file needs a JSON file"; request_file=$2; shift 2 ;;
+      *) usage ;;
+    esac
+  done
+  [ -n "$identity" ] || die "--identity is required"
+  [ -n "$request_file" ] && [ -f "$request_file" ] || die "--request-file must name an existing file"
+  parse_identity "$address" "$participant"
+  db=$(state_database)
+  python3 "$SCRIPT_DIR/fm-procevent-aviary-state.py" \
+    stage-submission "$db" "$ADDRESS" "$PARTICIPANT" "$identity" "$request_file" >/dev/null
+  decision_id=$(python3 "$SCRIPT_DIR/fm-procevent-aviary-state.py" \
+    submit "$db" "$ADDRESS" "$PARTICIPANT" "$identity") \
+    || die "Aviary submission remains durably staged; retry with the same identity and request file"
+  printf 'submitted: %s\n' "$decision_id"
+}
+
+cmd_retry_submissions() {
+  local address='' participant='' db=''
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --address) [ -n "${2-}" ] || die "--address needs an endpoint"; address=$2; shift 2 ;;
+      --participant) [ -n "${2-}" ] || die "--participant needs a label"; participant=$2; shift 2 ;;
+      *) usage ;;
+    esac
+  done
+  parse_identity "$address" "$participant"
+  db=$(state_database)
+  python3 "$SCRIPT_DIR/fm-procevent-aviary-state.py" \
+    retry-submissions "$db" "$ADDRESS" "$PARTICIPANT"
+}
+
 cmd_message() {
-  local address= participant= id= db
+  local address='' participant='' id='' db=''
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --address) [ -n "${2-}" ] || die "--address needs an endpoint"; address=$2; shift 2 ;;
@@ -157,7 +199,7 @@ cmd_message() {
 }
 
 cmd_poll() {
-  local address= participant= db
+  local address='' participant='' db=''
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --address) [ -n "${2-}" ] || die "--address needs an endpoint"; address=$2; shift 2 ;;
@@ -196,7 +238,7 @@ cmd_autohandle() {
 }
 
 cmd_retire() {
-  local address= participant=
+  local address='' participant=''
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --address) [ -n "${2-}" ] || die "--address needs an endpoint"; address=$2; shift 2 ;;
@@ -210,6 +252,8 @@ cmd_retire() {
 
 case "${1-}" in
   arm) shift; cmd_arm "$@" ;;
+  submit-decision) shift; cmd_submit_decision "$@" ;;
+  retry-submissions) shift; cmd_retry_submissions "$@" ;;
   track-decision) shift; cmd_track_decision "$@" ;;
   message) shift; cmd_message "$@" ;;
   source-id) shift; cmd_source_id "$@" ;;
