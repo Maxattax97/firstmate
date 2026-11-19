@@ -57,9 +57,14 @@ META_LOCK=$(fm_meta_lock_path "$META") || {
 }
 LOCKED_CONTROL=
 LOCKED_META=
+SCAN_DIR=
 release_locks() {
   [ -z "$LOCKED_META" ] || fm_lock_release "$LOCKED_META" || true
   [ -z "$LOCKED_CONTROL" ] || fm_lock_release "$LOCKED_CONTROL" || true
+  if [ -n "$SCAN_DIR" ]; then
+    rm -f -- "$SCAN_DIR/results" "$SCAN_DIR/errors"
+    rmdir -- "$SCAN_DIR" 2>/dev/null || true
+  fi
 }
 trap release_locks EXIT
 fm_lock_try_acquire "$CONTROL_LOCK" || {
@@ -145,7 +150,42 @@ command -v lsof >/dev/null 2>&1 || {
   echo "error: lsof is required to check for processes using the worker worktree" >&2
   exit 1
 }
-if ! lsof -t +D "$WT" 2>/dev/null | awk 'NF { found=1 } END { exit found ? 1 : 0 }'; then
+SCAN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-local-readiness.XXXXXX") || {
+  echo "error: cannot create a private directory for the worktree process scan" >&2
+  exit 1
+}
+if LC_ALL=C lsof -V -t +D "$WT" > "$SCAN_DIR/results" 2> "$SCAN_DIR/errors"; then
+  LSOF_STATUS=0
+else
+  LSOF_STATUS=$?
+fi
+SCAN_EMPTY=0
+SCAN_PIDS=0
+SCAN_INVALID=0
+while IFS= read -r scan_line; do
+  case "$scan_line" in
+    *[!0-9]*|'')
+      case "$scan_line" in
+        'lsof: no file use located: '*)
+          scan_path=${scan_line#lsof: no file use located: }
+          case "$scan_path" in
+            "$WT"|"$WT"/*) SCAN_EMPTY=$((SCAN_EMPTY + 1)) ;;
+            *) SCAN_INVALID=1 ;;
+          esac
+          ;;
+        *) SCAN_INVALID=1 ;;
+      esac
+      ;;
+    *) SCAN_PIDS=$((SCAN_PIDS + 1)) ;;
+  esac
+done < "$SCAN_DIR/results"
+if [ -s "$SCAN_DIR/errors" ] || [ "$LSOF_STATUS" -gt 1 ] \
+  || [ "$SCAN_INVALID" -ne 0 ] \
+  || { [ "$SCAN_EMPTY" -eq 0 ] && [ "$SCAN_PIDS" -eq 0 ]; }; then
+  echo "error: lsof process scan failed or was incomplete" >&2
+  exit 1
+fi
+if [ "$SCAN_PIDS" -gt 0 ]; then
   echo "error: a process still has files open in the worker worktree" >&2
   exit 1
 fi

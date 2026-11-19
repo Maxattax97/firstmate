@@ -118,6 +118,40 @@ SH
   pass 'present worker endpoint refuses even with a clean reviewed head'
 }
 
+test_lsof_command_failure_refuses() {
+  local out rc
+  make_case lsof-failure
+  cat > "$FAKEBIN/lsof" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$FAKEBIN/lsof"
+  rc=0
+  out=$(run_ready "$HEAD" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail 'failed lsof scan was accepted'
+  case "$out" in *'lsof process scan failed or was incomplete'*) ;; *) fail "unexpected lsof-failure refusal: $out" ;; esac
+  [ -z "$(sed -n 's/^local_done_head=//p' "$META")" ] || fail 'head pinned after failed lsof scan'
+  pass 'nonzero lsof scan refuses'
+}
+
+test_lsof_diagnostic_refuses() {
+  local out rc
+  make_case lsof-incomplete
+  cat > "$FAKEBIN/lsof" <<'SH'
+#!/usr/bin/env bash
+printf '12345\n'
+printf 'lsof: warning: some paths could not be inspected\n' >&2
+exit 0
+SH
+  chmod +x "$FAKEBIN/lsof"
+  rc=0
+  out=$(run_ready "$HEAD" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail 'diagnostic lsof scan was accepted'
+  case "$out" in *'lsof process scan failed or was incomplete'*) ;; *) fail "unexpected incomplete-scan refusal: $out" ;; esac
+  [ -z "$(sed -n 's/^local_done_head=//p' "$META")" ] || fail 'head pinned after incomplete lsof scan'
+  pass 'lsof diagnostic refuses even when exit status is zero'
+}
+
 test_open_worktree_process_refuses() {
   local out rc pid
   make_case open-process
@@ -194,6 +228,8 @@ fm_test_run \
   test_missing_worktree_refuses \
   test_unreachable_worker_head_refuses \
   test_live_endpoint_refuses \
+  test_lsof_command_failure_refuses \
+  test_lsof_diagnostic_refuses \
   test_open_worktree_process_refuses \
   test_branch_move_during_reconciliation_refuses \
   test_generation_change_during_reconciliation_refuses \
