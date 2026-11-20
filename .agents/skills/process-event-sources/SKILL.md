@@ -1,7 +1,7 @@
 ---
 name: process-event-sources
 description: >-
-  Load before arming a long-polling source firstmate owns, before registering a deterministic condition->action watch, on any `procevent <adapter> <source-id> <sequence>` check wake, and on any `process-event source stranded` or `process-event source failed to start` check wake.
+  Load before arming a long-polling source firstmate owns, before registering a deterministic condition->action watch, on any `procevent <adapter> <source-id> <sequence>` check wake, on any `process-event source stranded` or `process-event source failed to start` check wake, and before using Aviary as the `firstmate` participant.
 user-invocable: false
 metadata:
   internal: true
@@ -9,10 +9,14 @@ metadata:
 
 # process-event-sources
 
-Load this before arming a long-polling source, before registering a deterministic condition->action watch, whenever a `check:` wake carries `procevent <adapter> <source-id> <sequence>`, and whenever the watcher headlines a `process-event source stranded` or `process-event source failed to start` wake.
+Load this before arming a long-polling source, before registering a deterministic condition->action watch, whenever a `check:` wake carries `procevent <adapter> <source-id> <sequence>`, whenever the watcher headlines a `process-event source stranded` or `process-event source failed to start` wake, and before using Aviary as the `firstmate` participant.
 
 The runner exists so a blocking external process never holds firstmate's conversational turn.
 Firstmate registers a source, keeps working, and is woken when that process completes.
+
+For Aviary TUI messages or replies to Firstmate's decisions, use `bin/fm-procevent-aviary.sh` with an explicitly verified loopback endpoint and participant.
+Submit Firstmate's operator decisions through the adapter's durable outbox, and retry staged submissions with the same identity after an uncertain result or restart.
+The operating contract, request format, retained-message baseline, and recovery behavior are owned by [Process-to-event sources](../../../docs/configuration.md#aviary-operator-messages-and-decisions).
 
 ## Arming a source
 

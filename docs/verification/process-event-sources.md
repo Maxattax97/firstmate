@@ -245,3 +245,17 @@ Proactive delivery is inside that same boundary.
 The watcher reports a queued process-event result through the one shared actionable-exit path (`wake` in `bin/fm-push-transition-lib.sh`) that every existing signal, stale, and check wake already uses, so it reads no pane, queries no backend, and names no harness.
 Both axes are therefore unaffected by construction rather than by assumption: every supported primary harness re-arms from that same exit, and every runtime backend supplies endpoint state only to the pane paths this change does not touch.
 While `state/.afk` exists the watcher stays one-shot as before, because this delivery ends the cycle exactly like the existing check path and leaves classification to the daemon.
+
+## Aviary operator wake integration (2026-11-14)
+
+On Linux, `bash tests/fm-procevent-aviary.test.sh` passed against Firstmate base commit `bf0f3468` with a mocked Aviary protocol-version-2 CLI.
+The exact output was `# fm-procevent-aviary tests passed`.
+The test armed an explicit loopback endpoint and `firstmate` participant, tracked a decision ID, crossed a simulated disconnect/reconnect, reconciled an operator inbox message and decision answer/deferral, and exercised generic process-event capture and idempotent auto-handling.
+The test does not exercise an installed Aviary binary or live service, remote networking, OS-crash recovery, or human operator behavior.
+
+On 2026-11-15, `bash bin/fm-test-run.sh tests/fm-procevent-aviary.test.sh` passed with the fake Aviary CLI after adding durable decision submission and retry coverage.
+The exact test summary was `FM_TEST_END 2026-11-15T05:30:33Z tests/fm-procevent-aviary.test.sh exit=0 duration_ms=2590 gate_skip=false` and `FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=2640`.
+The regression stores a submission intent before the fake service accepts a request but drops its response, then verifies retry returns and durably tracks the same decision ID while a conflicting request under the same identity is rejected locally.
+`bash bin/fm-test-run.sh --check-coverage` passed with `FM_TEST_COVERAGE ok total=341 parallel=27 parallel_max_ms=850004 parallel_imbalance_ms=1977 parallel_unhinted=0 serial=298 serial_shards=11 serial_unhinted=44 serial_max_ms=1195987 serial_budget_ms=1200000 herdr=16`.
+On 2026-11-16, the same focused regression passed after moving decision submission before poller retirement to exercise concurrent ledger writers.
+The exact summary was `FM_TEST_END 2026-11-16T05:39:35Z tests/fm-procevent-aviary.test.sh exit=0 duration_ms=2328 gate_skip=false` and `FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=2367`.

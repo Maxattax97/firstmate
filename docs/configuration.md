@@ -3084,6 +3084,43 @@ Never run the registered blocking source command directly in a conversational tu
 A long-polling external process is registered as a *source* through its adapter, whose header and `--help` own the commands and flags.
 `bin/fm-procevent.sh` owns the generic contract; built-in adapters retain their tracked `bin/fm-procevent-<adapter>.sh` commands, while an explicitly bound external adapter routes through the trusted host contract above.
 
+### Aviary operator messages and decisions
+
+`bin/fm-procevent-aviary.sh` connects the Firstmate process-event runner to an explicitly selected local Aviary service and participant.
+Arm it with `bin/fm-procevent-aviary.sh arm --address 127.0.0.1:7432 --participant firstmate` after confirming that this endpoint and participant are the intended setup.
+The adapter accepts loopback endpoints only because Aviary's current participant labels do not authenticate callers and the service does not encrypt traffic.
+Arming does not edit user configuration, answer decisions, remove inbox messages, or silently set an endpoint.
+It binds the source to the service's reported database path and refuses to follow the same endpoint if it later points at a different database.
+The first reconciliation reports all retained inbox messages for that participant because Aviary does not expose an unread marker; inspect those messages as possible historical items.
+
+Aviary watch revisions are coalescible hints, so the adapter subscribes before reading durable state and reconciles after connection, revision changes, and reconnects.
+It pages the retained inbox from offset zero, deduplicates by message ID, and emits bounded previews with message IDs.
+Use `bin/fm-procevent-aviary.sh message --address 127.0.0.1:7432 --participant firstmate --id <message-id>` to retrieve the full retained message when its preview is truncated.
+Captured message IDs and decision answer/deferral cursors are committed to the private `state/aviary/` database only by the adapter's idempotent auto-handle after Firstmate has durably queued the wake.
+An interrupted capture is therefore eligible for replay by the normal process-event runner.
+The result contains full decision answers only when they fit its bounded preview; use Aviary's `decision_status` operation by the reported decision ID to inspect the retained full answer.
+
+After arming the adapter, ask the operator to decide something by preparing a JSON `DecisionRequest` whose `identity` is a stable, unique retry key and whose `agent` is `firstmate`, then submitting it through the adapter:
+
+```json
+{"identity":"<stable-key>","agent":"firstmate","question":"Proceed with the change?","options":["No","Yes"],"recommendation":1,"reason":"The implementation is ready for review."}
+```
+
+```sh
+bin/fm-procevent-aviary.sh submit-decision --address 127.0.0.1:7432 --participant firstmate --identity <stable-key> --request-file <request.json>
+```
+
+The adapter validates that the request identity and recipient match the command, commits the exact request to its private SQLite outbox before sending it, and records the returned ID in the tracked-decision table before reporting success.
+If the call's outcome is uncertain, repeat the same command with the same identity and unchanged request file; Aviary's submission idempotency returns the original ID, and the adapter refuses reuse of a local identity with different request content.
+After a Firstmate restart, run `bin/fm-procevent-aviary.sh retry-submissions --address 127.0.0.1:7432 --participant firstmate` to complete any staged submissions whose result was not durably recorded.
+Never retry an uncertain operator answer by submitting another answer; Aviary answers do not use submission identities.
+The adapter checks current status and retained deferral events for every decision it submitted, so a completed answer can be found after restart even though it no longer appears in the pending queue.
+Only decisions submitted or explicitly added with `track-decision` are monitored.
+Use `bin/fm-procevent-aviary.sh retire --address 127.0.0.1:7432 --participant firstmate` to stop the source.
+
+This integration provides durable reconciliation after hints and process restarts, not lossless notification delivery or a finite delay guarantee during an undetected network partition.
+It does not treat participant labels as authorization and never answers or sends messages automatically.
+
 `bin/fm-procevent-lavish.sh` is the first built-in adapter and wraps the published `lavish-axi poll` interface plus `lavish-axi reply` when the installed version supports synchronous reply acceptance.
 
 **Open the Lavish artifact first**
